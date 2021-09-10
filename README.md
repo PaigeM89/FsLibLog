@@ -53,7 +53,7 @@ open FsLibLog.Types
 
 ### Get a logger
 
-There are currently three ways to get a logger.
+There are currently six ways to get a logger.
 
 - `getCurrentLogger` - __Deprecated__ because inferring the correct StackFrame is too difficult. Creates a logger. It's name is based on the current StackFrame. 
 - `getLoggerByFunc` - Creates a logger based on `Reflection.MethodBase.GetCurrentMethod` call.  This is only useful for calls within functions.
@@ -62,6 +62,12 @@ There are currently three ways to get a logger.
 - `getLoggerByType` - Creates a logger given a `Type`.
 - `getLoggerByName` - Creates a logger given a `string`.
 
+**Fable** libraries can only use the following:
+- `getLoggerByType`
+- `getLoggerByName`
+- `getLoggerFor`
+
+The other functions rely reflection and thus are only available when compiling on `dotnet`.
 
 ### Set the loglevel, message, exception and parameters
 
@@ -178,10 +184,45 @@ module Say =
 
 ```
 
-
 ## Currently supported providers
 
 - [Serilog](https://github.com/serilog/serilog)
+
+## Adding a Log Provider in Fable
+
+### Create a Log Provider
+
+This can look something like [JsConsoleProvider](https://github.com/TheAngryByrd/FsLibLog/blob/master/examples/JsConsoleProvider/JsConsoleProvider.fs), with simple & direct logging to console. Other log providers, such as one to ship front-end logs to a back-end service, are left as an exercise for the reader.
+
+#### Option 1
+
+Copy/paste [FsLibLog.fs](https://github.com/TheAngryByrd/FsLibLog/blob/master/src/FsLibLog/FsLibLog.fs) into your library.
+
+#### Option 2
+
+Read over [Paket Github dependencies](https://fsprojects.github.io/Paket/github-dependencies.html).
+
+Add the following line to your `paket.depedencies` file.
+
+```
+github TheAngryByrd/FsLibLog examples/JsConsoleProvider.JsConsoleProvider.fs
+```
+
+Then add the following line to projects with `paket.references` file you want the console provider to be available to.
+
+```
+File: JsConsoleProvider.fs
+```
+
+### Register the Log Provider
+
+Note that the log provider must be registered manually in a Fable application, like so:
+
+```
+LogProvider.setLoggerProvider <| JsConsoleProvider.create()
+```
+
+From there, the logger can be used as normal.
 
 ---
 
