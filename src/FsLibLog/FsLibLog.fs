@@ -19,8 +19,8 @@ module Types =
     type MessageThunk = (unit -> string) option
 
     /// The signature of a log message function
-    type Logger = LogLevel -> MessageThunk -> exn option -> obj array -> bool
-    type MappedContext = string -> obj -> bool -> IDisposable
+    type Logger = Func<LogLevel, MessageThunk, exn option, obj array, bool>
+    type MappedContext = Func<string, obj, bool, IDisposable>
 
     /// Type representing a Log
     [<NoEquality;NoComparison>]
@@ -46,8 +46,54 @@ module Types =
         abstract member Log :  Logger
         abstract member MappedContext :  MappedContext
 
+#if FABLE_COMPILER
+    // Fable doesn't support System.Collections.Generic.Stack, so this implementation (from FCS)
+    // is used instead.
+    type Stack<'a>(n)  =
+        let mutable contents = Array.zeroCreate<'a>(n)
+        let mutable count = 0
+
+        member buf.Ensure newSize =
+            let oldSize = contents.Length
+            if newSize > oldSize then
+                let old = contents
+                contents <- Array.zeroCreate (max newSize (oldSize * 2))
+                Array.blit old 0 contents 0 count
+
+        member buf.Count = count
+        member buf.Pop() =
+            let item = contents.[count - 1]
+            count <- count - 1
+            item
+
+        member buf.Peep() = contents.[count - 1]
+        member buf.Top(n) = [ for x in contents.[max 0 (count-n)..count - 1] -> x ] |> List.rev
+        member buf.Push(x) =
+            buf.Ensure(count + 1)
+            contents.[count] <- x
+            count <- count + 1
+
+        member buf.IsEmpty = (count = 0)
+#endif
+
     [<AutoOpen>]
     module Inner =
+#if FABLE_COMPILER
+        type DisposableStack() =
+            let stack = Stack<IDisposable>(2)
+            interface IDisposable with
+                member __.Dispose () =
+                    while stack.Count > 0 do
+                        stack.Pop().Dispose()
+
+            member __.Push (item : IDisposable) = stack.Push item
+            member __.Push (items : IDisposable list) = items |> List.iter stack.Push
+
+            static member Create (items : IDisposable list) =
+                let ds = new DisposableStack()
+                ds.Push items
+                ds
+#else
         open System.Collections.Generic
 
         type DisposableStack() =
@@ -65,6 +111,7 @@ module Types =
                 let ds = new DisposableStack()
                 ds.Push items
                 ds
+#endif
 
         type ILog with
 
@@ -80,13 +127,11 @@ module Types =
             member logger.fromLog (log : Log) =
                 use __ =
                     log.AdditionalNamedParameters
-                    |> List.map(fun (key,value, destructure) -> logger.MappedContext key value destructure)
+                    |> List.map(fun (key,value, destructure) -> logger.MappedContext.Invoke(key, value, destructure))
                     // This stack is important, it causes us to unwind as if you have multiple uses in a row
                     |> DisposableStack.Create
 
-                log.Parameters
-                |> List.toArray
-                |> logger.Log log.LogLevel log.Message log.Exception
+                logger.Log.Invoke(log.LogLevel, log.Message, log.Exception, (List.toArray log.Parameters))
 
             /// **Description**
             ///
@@ -403,7 +448,8 @@ module Operators =
     /// <returns>The amended log with the parameter added.</returns>
     let (>>!!) log e = log >> Log.addException e
 
-
+#if !FABLE_COMPILER
+// We can't hook up the Serilog provider in Fable
 module Providers =
     module SerilogProvider =
         open System
@@ -572,10 +618,16 @@ module Providers =
                         serilogGateway.Write logger translatedValue (m()) formatParams
                     true
 
+            let writeMessageFunc logger =
+                Func<LogLevel, MessageThunk, Exception option, obj array, bool>(
+                    fun logLevel (messageFunc : MessageThunk) ``exception`` formatParams ->
+                        writeMessage logger logLevel messageFunc ``exception`` formatParams
+                )
+
             interface ILogProvider with
                 member this.GetLogger(name: string): Logger =
                     getLoggerByName name
-                    |> writeMessage
+                    |> writeMessageFunc
                 member this.OpenMappedContext(key: string) (value: obj) (destructure: bool): IDisposable =
                     pushProperty key value destructure
                 member this.OpenNestedContext(message: string): IDisposable =
@@ -584,20 +636,25 @@ module Providers =
         let create () =
             SerigLogProvider () :> ILogProvider
 
-
+#endif
 
 module LogProvider =
     open System
     open Types
+#if !FABLE_COMPILER
     open Providers
+#endif
     open System.Diagnostics
     open Microsoft.FSharp.Quotations.Patterns
 
     let mutable private currentLogProvider = None
 
-    let private knownProviders = [
-        (SerilogProvider.isAvailable , SerilogProvider.create)
-    ]
+    let private knownProviders =
+        [
+#if !FABLE_COMPILER
+            (SerilogProvider.isAvailable , SerilogProvider.create)
+#endif
+        ]
 
     /// Greedy search for first available LogProvider. Order of known providers matters.
     let private resolvedLogger = lazy (
@@ -606,7 +663,7 @@ module LogProvider =
         |> Option.map(fun (_, create) -> create())
     )
 
-    let private noopLogger _ _ _ _ = false
+    let private noopLogger = Func<_, _, _, _, bool>(fun _ _ _ _ -> false)
 
     let private noopDisposable = {
         new IDisposable with
@@ -648,6 +705,16 @@ module LogProvider =
             p.OpenMappedContext key value destructureObjects
         | None ->
             noopDisposable
+
+
+    /// <summary>
+    /// Wraps <see cref="openMappedContextDestucturable" /> in a `Func` for easier consumption in Fable.
+    /// </summary>
+    /// <returns>
+    /// A `Func` of `(key: string, value: obj, destructureObjects: bool)` that returns an `IDisposable`.
+    /// </returns>
+    let openMappedContextDestucturableFuncWrapper =
+        Func<string, obj, bool, IDisposable>(openMappedContextDestucturable)
 
     /// **Description**
     ///
@@ -700,7 +767,7 @@ module LogProvider =
         { new ILog
             with
                 member x.Log = logFunc
-                member x.MappedContext = openMappedContextDestucturable}
+                member x.MappedContext = openMappedContextDestucturableFuncWrapper}
 
     /// **Description**
     ///
@@ -723,9 +790,11 @@ module LogProvider =
     /// **Output Type**
     ///   * `ILog`
     ///
-    let getLoggerFor<'a> () =
+    let inline getLoggerFor<'a> () =
         getLoggerByType(typeof<'a>)
 
+// Can't do this kind of reflection in Fable
+#if !FABLE_COMPILER
     let rec getModuleType =
         function
         | PropertyGet (_, propertyInfo, _) -> propertyInfo.DeclaringType
@@ -755,7 +824,7 @@ module LogProvider =
     let getLoggerByQuotation (quotation : Quotations.Expr) =
         getModuleType quotation
         |> getLoggerByType
-
+#endif
 
 
     /// **Description**
@@ -772,7 +841,8 @@ module LogProvider =
         sprintf "%s.%s" mi.DeclaringType.FullName mi.Name
         |> getLoggerByName
 
-
+// Can't access StackFrame in Fable
+#if !FABLE_COMPILER
     /// **Description**
     ///
     /// Creates a logger. It's name is based on the current StackFrame. This will attempt to retrieve any loggers set with `setLoggerProvider`.  It will fallback to a known list of providers.
@@ -784,3 +854,4 @@ module LogProvider =
     let getCurrentLogger ()   =
         let stackFrame = StackFrame(2, false)
         getLoggerByType(stackFrame.GetMethod().DeclaringType)
+#endif
