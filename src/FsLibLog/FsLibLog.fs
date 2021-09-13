@@ -632,7 +632,7 @@ module Providers =
             interface ILogProvider with
                 member this.GetLogger(name: string): Logger =
                     getLoggerByName name
-                    |> writeMessageFunc
+                    |> writeMessage
                 member this.OpenMappedContext(key: string) (value: obj) (destructure: bool): IDisposable =
                     pushProperty key value destructure
                 member this.OpenNestedContext(message: string): IDisposable =
