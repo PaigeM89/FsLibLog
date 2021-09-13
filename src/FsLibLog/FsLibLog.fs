@@ -19,8 +19,10 @@ module Types =
     type MessageThunk = (unit -> string) option
 
     /// The signature of a log message function
-    type Logger = Func<LogLevel, MessageThunk, exn option, obj array, bool>
-    type MappedContext = Func<string, obj, bool, IDisposable>
+    type Logger = LogLevel -> MessageThunk -> exn option -> obj array -> bool
+        //Func<LogLevel, MessageThunk, exn option, obj array, bool>
+    type MappedContext = string -> obj -> bool -> IDisposable
+        //Func<string, obj, bool, IDisposable>
 
     /// Type representing a Log
     [<NoEquality;NoComparison>]
@@ -127,11 +129,14 @@ module Types =
             member logger.fromLog (log : Log) =
                 use __ =
                     log.AdditionalNamedParameters
-                    |> List.map(fun (key,value, destructure) -> logger.MappedContext.Invoke(key, value, destructure))
+                    |> List.map(fun (key,value, destructure) -> logger.MappedContext key value destructure)
+                        //logger.MappedContext.Invoke(key, value, destructure))
                     // This stack is important, it causes us to unwind as if you have multiple uses in a row
                     |> DisposableStack.Create
-
-                logger.Log.Invoke(log.LogLevel, log.Message, log.Exception, (List.toArray log.Parameters))
+                log.Parameters
+                |> List.toArray
+                |> logger.Log log.LogLevel log.Message log.Exception
+                //logger.Log.Invoke(log.LogLevel, log.Message, log.Exception, (List.toArray log.Parameters))
 
             /// **Description**
             ///
@@ -663,7 +668,8 @@ module LogProvider =
         |> Option.map(fun (_, create) -> create())
     )
 
-    let private noopLogger = Func<_, _, _, _, bool>(fun _ _ _ _ -> false)
+    let private noopLogger = fun _ _ _ _ -> false
+    //let private noopLogger = Func<_, _, _, _, bool>(fun _ _ _ _ -> false)
 
     let private noopDisposable = {
         new IDisposable with
@@ -767,7 +773,7 @@ module LogProvider =
         { new ILog
             with
                 member x.Log = logFunc
-                member x.MappedContext = openMappedContextDestucturableFuncWrapper}
+                member x.MappedContext = openMappedContextDestucturable }
 
     /// **Description**
     ///

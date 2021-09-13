@@ -87,7 +87,8 @@ type private ConsoleProvider () =
     interface ILogProvider with
 
         member this.GetLogger(name: string): Logger =
-            Func<_, _, _, _, bool>(writeMessage name)
+            //Func<_, _, _, _, bool>(writeMessage name)
+            writeMessage name
         member this.OpenMappedContext(key: string) (value: obj) (destructure: bool): System.IDisposable =
             addProp key value
         member this.OpenNestedContext(message: string): System.IDisposable =
